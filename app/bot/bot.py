@@ -22,11 +22,18 @@ PROCESS_NUMBER, CLIENT_NAME, COMPANY_NAME, POLAND, PROCESS_DESCRIPTION, SUPPLIER
 # INVOICE
 INVOICE_CLIENT, INVOICE_PROCESS, INVOICE_TYPE, INVOICE_NUMBER, INVOICE_DATE, INVOICE_SELLER, INVOICE_BUYER, INVOICE_AMOUNT, INVOICE_CURRENCY, INVOICE_RATE = range(20,30)
 
+#PAYMENTS
+PAYMENT_CLIENT, PAYMENT_PROCESS, PAYMENT_INVOICE, PAYMENT_NUMBER, PAYMENT_AMOUNT, PAYMENT_CURRENCY, PAYMENT_RATE, PAYMENT_DATE = range(40,48)
+
+# HISTORY
+HISTORY_CLIENT, HISTORY_PROCESS = range(50,52)
+
 role_map = {
     "Адміністратор": "admin",
     "Менеджер": "manager",
     "Бухгалтер": "accountant"
 }
+CANCEL = "❌ Закрити"
 
 # ---------------- DATABASE ----------------
 
@@ -81,7 +88,6 @@ def add_process(process_number, client_name, company_name, description, telegram
 
         cursor = conn.cursor()
 
-        # отримати user_id
         cursor.execute(
             "SELECT id FROM users WHERE telegram_id = ?",
             (telegram_id,)
@@ -94,24 +100,32 @@ def add_process(process_number, client_name, company_name, description, telegram
 
         user_id = user["id"]
 
-        # -------- CLIENT --------
+        # -------- CLIENT ENTITY --------
 
         cursor.execute(
-            "INSERT OR IGNORE INTO clients (name) VALUES (?)",
+            """
+            INSERT OR IGNORE INTO entities (name, type)
+            VALUES (?, 'client')
+            """,
             (client_name,)
         )
 
         cursor.execute(
-            "SELECT id FROM clients WHERE name = ?",
+            "SELECT id FROM entities WHERE name = ?",
             (client_name,)
         )
 
         client_id = cursor.fetchone()["id"]
 
-        # -------- COMPANY --------
+        # -------- COMPANY ENTITY --------
 
         cursor.execute(
-            "SELECT id FROM companies WHERE name = ?",
+            """
+            SELECT id
+            FROM entities
+            WHERE name = ?
+            AND type = 'company'
+            """,
             (company_name,)
         )
 
@@ -120,7 +134,7 @@ def add_process(process_number, client_name, company_name, description, telegram
         if not company:
             raise Exception("Компанія не знайдена")
 
-        origin_company_id = company["id"]
+        company_id = company["id"]
 
         # -------- INSERT PROCESS --------
 
@@ -130,8 +144,8 @@ def add_process(process_number, client_name, company_name, description, telegram
                 """
                 INSERT INTO processes (
                     process_number,
-                    client_id,
-                    origin_company_id,
+                    client_entity_id,
+                    managing_company_id,
                     steiner_poland_involved,
                     description,
                     start_date,
@@ -143,16 +157,47 @@ def add_process(process_number, client_name, company_name, description, telegram
                 (
                     process_number,
                     client_id,
-                    origin_company_id,
+                    company_id,
                     poland,
                     description,
                     user_id
                 )
             )
 
+        process_id = get_process_id(process_number)
+
+        add_event(
+            conn,
+            process_id,
+            user_id,
+            "process_created",
+            f"Створено процес #{process_number}"
+        )
+
+        # -------- PARTICIPANTS --------
+
+        with conn:
+
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO process_participants
+                (process_id, entity_id, role)
+                VALUES (?, ?, 'client')
+                """,
+                (process_id, client_id)
+            )
+
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO process_participants
+                (process_id, entity_id, role)
+                VALUES (?, ?, 'company')
+                """,
+                (process_id, company_id)
+            )
+
     finally:
         conn.close()
-
 
 def get_process_id(process_number):
 
@@ -175,19 +220,40 @@ def get_process_id(process_number):
     finally:
         conn.close()
 
-
 def add_supplier(process_id, supplier_name):
 
     conn = get_connection()
+
     try:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO entities (name, type)
+            VALUES (?, 'supplier')
+            """,
+            (supplier_name,)
+        )
+
+        cursor.execute(
+            "SELECT id FROM entities WHERE name = ?",
+            (supplier_name,)
+        )
+
+        supplier_id = cursor.fetchone()["id"]
+
         with conn:
+
             conn.execute(
                 """
-                INSERT INTO suppliers (process_id, supplier_name)
-                VALUES (?, ?)
+                INSERT OR IGNORE INTO process_participants
+                (process_id, entity_id, role)
+                VALUES (?, ?, 'supplier')
                 """,
-                (process_id, supplier_name)
+                (process_id, supplier_id)
             )
+
     finally:
         conn.close()
 
@@ -204,7 +270,8 @@ def get_clients():
         cursor.execute(
             """
             SELECT id, name
-            FROM clients
+            FROM entities
+            WHERE type='client'
             ORDER BY name
             """
         )
@@ -213,7 +280,6 @@ def get_clients():
 
     finally:
         conn.close()
-
 
 def get_companies():
 
@@ -226,7 +292,8 @@ def get_companies():
         cursor.execute(
             """
             SELECT id, name
-            FROM companies
+            FROM entities
+            WHERE type='company'
             ORDER BY name
             """
         )
@@ -235,7 +302,6 @@ def get_companies():
 
     finally:
         conn.close()
-
 
 def get_processes_by_client(client_id):
 
@@ -249,7 +315,7 @@ def get_processes_by_client(client_id):
             """
             SELECT id, process_number
             FROM processes
-            WHERE client_id = ?
+            WHERE client_entity_id = ?
             ORDER BY process_number DESC
             """,
             (client_id,)
@@ -259,7 +325,6 @@ def get_processes_by_client(client_id):
 
     finally:
         conn.close()
-
 
 def get_company_id(name):
 
@@ -272,8 +337,9 @@ def get_company_id(name):
         cursor.execute(
             """
             SELECT id
-            FROM companies
+            FROM entities
             WHERE name = ?
+            AND type = 'company'
             """,
             (name,)
         )
@@ -288,7 +354,6 @@ def get_company_id(name):
     finally:
         conn.close()
 
-
 def add_invoice(data):
 
     conn = get_connection()
@@ -302,13 +367,13 @@ def add_invoice(data):
 
         with conn:
 
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO invoices (
                     invoice_number,
                     process_id,
-                    seller_company_id,
-                    buyer_company_id,
+                    seller_entity_id,
+                    buyer_entity_id,
                     invoice_type,
                     invoice_date,
                     amount,
@@ -332,9 +397,32 @@ def add_invoice(data):
                 )
             )
 
+            invoice_id = cursor.lastrowid
+            add_event(
+                conn,
+                data["process_id"],
+                None,
+                "invoice_created",
+                f"Створено інвойс {data['invoice_number']} ({amount_eur:.2f} EUR)"
+            )
+            # ledger entry
+            conn.execute(
+                """
+                INSERT INTO ledger
+                (process_id, entity_from_id, entity_to_id, amount_eur, entry_type, reference_id)
+                VALUES (?, ?, ?, ?, 'invoice', ?)
+                """,
+                (
+                    data["process_id"],
+                    data["seller_company_id"],
+                    data["buyer_company_id"],
+                    amount_eur,
+                    invoice_id
+                )
+            )
+
     finally:
         conn.close()
-
 
 def get_process_participants(process_id):
 
@@ -344,40 +432,28 @@ def get_process_participants(process_id):
 
         cursor = conn.cursor()
 
-        participants = []
+        cursor.execute(
+            """
+            SELECT e.id, e.name, e.type
+            FROM process_participants pp
+            JOIN entities e ON e.id = pp.entity_id
+            WHERE pp.process_id = ?
 
-        # client
-        cursor.execute("""
-            SELECT clients.name, clients.id, 'client' as type
-            FROM processes
-            JOIN clients ON clients.id = processes.client_id
-            WHERE processes.id = ?
-        """, (process_id,))
+            UNION
 
-        participants.extend(cursor.fetchall())
+            SELECT id, name, type
+            FROM entities
+            WHERE type = 'company'
 
-        # companies
-        cursor.execute("""
-            SELECT id, name, 'company' as type
-            FROM companies
-        """)
+            ORDER BY name
+            """,
+            (process_id,)
+        )
 
-        participants.extend(cursor.fetchall())
-
-        # suppliers
-        cursor.execute("""
-            SELECT id, supplier_name as name, 'supplier' as type
-            FROM suppliers
-            WHERE process_id = ?
-        """, (process_id,))
-
-        participants.extend(cursor.fetchall())
-
-        return participants
+        return cursor.fetchall()
 
     finally:
         conn.close()
-
 
 def get_process_number_db(process_id):
 
@@ -405,7 +481,6 @@ def get_process_number_db(process_id):
     finally:
         conn.close()
 
-
 def set_poland_involved(process_id):
 
     conn = get_connection()
@@ -425,6 +500,7 @@ def set_poland_involved(process_id):
 
     finally:
         conn.close()
+
 # ---------------- MESSAGE TRACKING ----------------
 
 def save_user_message(update, context):
@@ -463,6 +539,358 @@ async def clear_dialog(update, context):
 
     context.user_data["dialog_messages"] = []
 
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    await clear_dialog(update, context)
+
+    await update.message.reply_text(
+        "Операцію скасовано",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    await show_main_menu(update)
+
+    return ConversationHandler.END
+
+
+#----------------PAYMENTS DATABASE -----------------
+
+def add_payment(data):
+
+    conn = get_connection()
+
+    try:
+
+        amount = data["amount"]
+        rate = data["exchange_rate_to_eur"]
+
+        amount_eur = amount * rate
+
+        with conn:
+
+            cursor = conn.execute(
+                """
+                INSERT INTO payments (
+                    payment_number,
+                    process_id,
+                    invoice_id,
+                    from_entity_id,
+                    to_entity_id,
+                    amount,
+                    currency,
+                    payment_date
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    data["payment_number"],
+                    data["process_id"],
+                    data["invoice_id"],
+                    data["from_entity_id"],
+                    data["to_entity_id"],
+                    amount,
+                    data["currency"],
+                    data["payment_date"]
+                )
+            )
+
+            payment_id = cursor.lastrowid
+
+            # ledger entry
+            conn.execute(
+                """
+                INSERT INTO ledger
+                (process_id, entity_from_id, entity_to_id, amount_eur, entry_type, reference_id)
+                VALUES (?, ?, ?, ?, 'payment', ?)
+                """,
+                (
+                    data["process_id"],
+                    data["from_entity_id"],
+                    data["to_entity_id"],
+                    amount_eur,
+                    payment_id
+                )
+            )
+            add_event(
+                conn,
+                data["process_id"],
+                None,
+                "payment_added",
+                f"Додано платіж {data['payment_number']} ({amount_eur:.2f} EUR)"
+            )
+
+    finally:
+        conn.close()
+
+def get_process_balance(process_id):
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT
+                entity_from_id,
+                entity_to_id,
+                SUM(amount_eur) as total
+            FROM ledger
+            WHERE process_id = ?
+            GROUP BY entity_from_id, entity_to_id
+            """,
+            (process_id,)
+        )
+
+        return cursor.fetchall()
+
+    finally:
+        conn.close()
+
+def get_process_finance(process_id):
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        # клієнтські інвойси
+        cursor.execute(
+            """
+            SELECT SUM(amount_eur)
+            FROM invoices
+            WHERE process_id = ?
+            """,
+            (process_id,)
+        )
+
+        invoices = cursor.fetchone()[0] or 0
+
+        # платежі
+        cursor.execute(
+            """
+            SELECT SUM(amount * exchange_rate_to_eur)
+            FROM payments
+            WHERE process_id = ?
+            """,
+            (process_id,)
+        )
+
+        payments = cursor.fetchone()[0] or 0
+
+        return invoices, payments
+
+    finally:
+        conn.close()
+
+def get_process_invoices(process_id):
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT id, invoice_number, amount, currency
+            FROM invoices
+            WHERE process_id = ?
+            ORDER BY invoice_date DESC
+            """,
+            (process_id,)
+        )
+
+        return cursor.fetchall()
+
+    finally:
+        conn.close()
+
+def get_invoice(invoice_id):
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT
+                id,
+                seller_entity_id,
+                buyer_entity_id,
+                amount,
+                currency
+            FROM invoices
+            WHERE id = ?
+            """,
+            (invoice_id,)
+        )
+
+        return cursor.fetchone()
+
+    finally:
+        conn.close()
+
+def update_invoice_status(invoice_id):
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        # сума інвойсу
+        cursor.execute(
+            """
+            SELECT amount_eur
+            FROM invoices
+            WHERE id = ?
+            """,
+            (invoice_id,)
+        )
+
+        row = cursor.fetchone()
+
+        if not row:
+            return
+
+        invoice_amount = row["amount_eur"]
+
+        # сума оплат
+        cursor.execute(
+            """
+            SELECT SUM(amount * COALESCE(exchange_rate_to_eur,1)) AS paid
+            FROM payments
+            WHERE invoice_id = ?
+            """,
+            (invoice_id,)
+        )
+
+        paid = cursor.fetchone()["paid"] or 0
+
+        # визначаємо статус
+        if paid == 0:
+
+            status = "issued"
+
+        elif paid < invoice_amount:
+
+            status = "partially_paid"
+
+        else:
+
+            status = "paid"
+
+        with conn:
+
+            conn.execute(
+                """
+                UPDATE invoices
+                SET status = ?
+                WHERE id = ?
+                """,
+                (status, invoice_id)
+            )
+
+    finally:
+        conn.close()
+
+def get_invoice_payment_status(invoice_id):
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT amount_eur, invoice_number
+            FROM invoices
+            WHERE id = ?
+            """,
+            (invoice_id,)
+        )
+
+        invoice = cursor.fetchone()
+
+        if not invoice:
+            return None
+
+        invoice_amount = invoice["amount_eur"]
+        invoice_number = invoice["invoice_number"]
+
+        cursor.execute(
+            """
+            SELECT SUM(amount * COALESCE(exchange_rate_to_eur,1)) as paid
+            FROM payments
+            WHERE invoice_id = ?
+            """,
+            (invoice_id,)
+        )
+
+        paid = cursor.fetchone()["paid"] or 0
+
+        remaining = invoice_amount - paid
+
+        return {
+            "invoice_number": invoice_number,
+            "invoice_amount": invoice_amount,
+            "paid": paid,
+            "remaining": remaining
+        }
+
+    finally:
+        conn.close()
+
+#----------- HISTORY DATABASE -----------
+
+def add_event(conn, process_id, user_id, event_type, description):
+
+    conn.execute(
+        """
+        INSERT INTO events (
+            process_id,
+            user_id,
+            event_type,
+            description
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            process_id,
+            user_id,
+            event_type,
+            description
+        )
+    )
+
+def get_process_events(process_id):
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT created_at, description
+            FROM events
+            WHERE process_id = ?
+            ORDER BY created_at DESC
+            """,
+            (process_id,)
+        )
+
+        return cursor.fetchall()
+
+    finally:
+        conn.close()
 
 # ---------------- START ----------------
 
@@ -570,11 +998,13 @@ async def start_add_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_user_message(update, context)
 
+    keyboard = [[CANCEL]]
+
     await send_message(
         update,
         context,
         "Введіть номер процесу:",
-        remove_keyboard=True
+        ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
 
     return PROCESS_NUMBER
@@ -587,8 +1017,14 @@ async def get_process_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data["process_number"] = process_number
 
-    await send_message(update, context, "Введіть назву клієнта:")
+    keyboard = [[CANCEL]]
 
+    await send_message(
+        update,
+        context,
+        "Введіть назву клієнта:",
+        ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
     return CLIENT_NAME
 
 async def get_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -601,7 +1037,8 @@ async def get_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ["LLC Steiner Ukraine"],
         ["Steiner Polska sp. z o.o."],
         ["LLC Spels"],
-        ["Spels MEA"]
+        ["Spels MEA"],
+        [CANCEL]
     ]
 
     await send_message(
@@ -637,7 +1074,8 @@ async def get_company_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # інакше питаємо про участь Польщі
     keyboard = [
         ["Так"],
-        ["Ні"]
+        ["Ні"],
+        [CANCEL]  
     ]
 
     await send_message(
@@ -660,11 +1098,13 @@ async def get_poland(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         context.user_data["poland"] = 0
 
+    keyboard = [[CANCEL]]
+
     await send_message(
         update,
         context,
         "Опишіть процес:",
-        remove_keyboard=True
+        ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
 
     return PROCESS_DESCRIPTION
@@ -677,7 +1117,14 @@ async def get_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["suppliers"] = []
 
-    await send_message(update, context, "Введіть постачальника:")
+    keyboard = [[CANCEL]]
+
+    await send_message(
+        update,
+        context,
+        "Введіть постачальника:",
+        ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
 
     return SUPPLIER
 
@@ -689,7 +1136,7 @@ async def get_supplier(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["suppliers"].append(supplier)
 
-    keyboard = [["Додати ще"], ["Готово"]]
+    keyboard = [["Додати ще"], ["Готово"], [CANCEL]]
 
     await send_message(
         update,
@@ -702,6 +1149,9 @@ async def get_supplier(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def supplier_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    if update.message.text == CANCEL:
+        return await cancel(update, context)
+    
     save_user_message(update, context)
 
     choice = update.message.text
@@ -834,7 +1284,12 @@ async def invoice_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor = conn.cursor()
 
     cursor.execute(
-        "SELECT id FROM clients WHERE name = ?",
+        """
+        SELECT id
+        FROM entities
+        WHERE name = ?
+        AND type = 'client'
+        """,
         (client_name,)
     )
 
@@ -958,14 +1413,11 @@ async def invoice_seller(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if p["name"] == name:
 
-            if p["type"] == "company":
-                context.user_data["seller_company_id"] = p["id"]
+            context.user_data["seller_company_id"] = p["id"]
 
-                if p["name"] == "Steiner Polska sp. z o.o.":
-                    set_poland_involved(context.user_data["process_id"])
+            if p["name"] == "Steiner Polska sp. z o.o.":
 
-            else:
-                context.user_data["seller_company_id"] = None
+                set_poland_involved(context.user_data["process_id"])
 
             context.user_data["seller_name"] = p["name"]
             context.user_data["seller_type"] = p["type"]
@@ -995,15 +1447,11 @@ async def invoice_buyer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if p["name"] == name:
 
-            if p["type"] == "company":
-                context.user_data["buyer_company_id"] = p["id"]
-                
-                if p["name"] == "Steiner Polska sp. z o.o.":
-                
-                    set_poland_involved(context.user_data["process_id"])
-            
-            else:
-                context.user_data["buyer_company_id"] = None
+            context.user_data["buyer_company_id"] = p["id"]
+
+            if p["name"] == "Steiner Polska sp. z o.o.":
+
+                set_poland_involved(context.user_data["process_id"])
 
             context.user_data["buyer_name"] = p["name"]
             context.user_data["buyer_type"] = p["type"]
@@ -1089,6 +1537,385 @@ async def invoice_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update)
 
     return ConversationHandler.END
+
+#----------------- ADD PAYMENTS -------
+async def send_payment_summary(update, context):
+
+    data = context.user_data
+
+    process_number = get_process_number_db(data["process_id"])
+
+    invoice_info = get_invoice_payment_status(data["invoice_id"])
+
+    amount = data["amount"]
+    currency = data["currency"]
+    rate = data["exchange_rate_to_eur"]
+
+    amount_eur = amount * rate
+
+    await update.message.reply_text(
+        f"""
+💸 *Платіж створено*
+
+Номер: `{data['payment_number']}`
+
+Процес: `#{process_number}`
+
+Інвойс: `{invoice_info['invoice_number']}`
+
+Сума платежу:
+*{amount} {currency}*
+≈ *{amount_eur:.2f} EUR*
+
+📄 Інвойс:
+
+Сума: *{invoice_info['invoice_amount']:.2f} EUR*
+Оплачено: *{invoice_info['paid']:.2f} EUR*
+Залишок: *{invoice_info['remaining']:.2f} EUR*
+
+Дата: `{data['payment_date']}`
+""",
+        parse_mode="Markdown"
+    )
+
+async def start_add_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    save_user_message(update, context)
+
+    clients = get_clients()
+
+    keyboard = [[c["name"]] for c in clients]
+
+    await send_message(
+        update,
+        context,
+        "Оберіть клієнта:",
+        ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+
+    return PAYMENT_CLIENT
+
+async def payment_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    save_user_message(update, context)
+
+    client_name = update.message.text
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT id
+        FROM entities
+        WHERE name = ?
+        AND type = 'client'
+        """,
+        (client_name,)
+    )
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+
+        await send_message(update, context, "Клієнт не знайдений")
+        return PAYMENT_CLIENT
+
+    client_id = row["id"]
+
+    context.user_data["client_id"] = client_id
+
+    processes = get_processes_by_client(client_id)
+
+    keyboard = [[p["process_number"]] for p in processes]
+
+    await send_message(
+        update,
+        context,
+        "Оберіть процес:",
+        ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+
+    return PAYMENT_PROCESS
+
+async def payment_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    save_user_message(update, context)
+
+    process_number = update.message.text
+
+    try:
+        process_id = get_process_id(process_number)
+    except:
+        await send_message(update, context, "Процес не знайдений")
+        return PAYMENT_PROCESS
+
+    context.user_data["process_id"] = process_id
+
+    invoices = get_process_invoices(process_id)
+
+    if not invoices:
+
+        await send_message(update, context, "У процесі немає інвойсів")
+        return ConversationHandler.END
+
+    context.user_data["invoices"] = invoices
+
+    keyboard = [[f"{i['invoice_number']} ({i['amount']} {i['currency']})"] for i in invoices]
+
+    await send_message(
+        update,
+        context,
+        "Оберіть інвойс:",
+        ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+
+    return PAYMENT_INVOICE
+
+async def payment_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    save_user_message(update, context)
+
+    invoice_number = update.message.text.split(" (")[0]
+
+    invoices = context.user_data["invoices"]
+
+    invoice_id = None
+
+    for inv in invoices:
+
+        if inv["invoice_number"] == invoice_number:
+            invoice_id = inv["id"]
+            break
+
+    if not invoice_id:
+
+        await send_message(update, context, "Інвойс не знайдений")
+        return PAYMENT_INVOICE
+
+    context.user_data["invoice_id"] = invoice_id
+
+    invoice = get_invoice(invoice_id)
+
+    # визначаємо сторони платежу
+    context.user_data["from_entity_id"] = invoice["buyer_entity_id"]
+    context.user_data["to_entity_id"] = invoice["seller_entity_id"]
+
+    # отримуємо фінансовий стан інвойсу
+    invoice_info = get_invoice_payment_status(invoice_id)
+
+    await send_message(
+        update,
+        context,
+        f"""
+📄 Інвойс `{invoice_info['invoice_number']}`
+
+Сума: *{invoice_info['invoice_amount']:.2f} EUR*
+Оплачено: *{invoice_info['paid']:.2f} EUR*
+Залишок: *{invoice_info['remaining']:.2f} EUR*
+
+Введіть номер платежу:
+""",
+        remove_keyboard=True
+    )
+
+    return PAYMENT_NUMBER
+
+async def payment_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    save_user_message(update, context)
+
+    context.user_data["payment_number"] = update.message.text
+
+    await send_message(
+        update,
+        context,
+        "Введіть суму:"
+    )
+
+    return PAYMENT_AMOUNT
+
+async def payment_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    save_user_message(update, context)
+
+    try:
+        amount = float(update.message.text.replace(",", "."))
+    except:
+        await send_message(update, context, "Введіть число")
+        return PAYMENT_AMOUNT
+
+    context.user_data["amount"] = amount
+
+    keyboard = [["EUR"], ["USD"], ["PLN"], ["UAH"]]
+
+    await send_message(
+        update,
+        context,
+        "Оберіть валюту:",
+        ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+
+    return PAYMENT_CURRENCY
+
+async def payment_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    save_user_message(update, context)
+
+    currency = update.message.text
+
+    context.user_data["currency"] = currency
+
+    if currency == "EUR":
+
+        context.user_data["exchange_rate_to_eur"] = 1
+
+        await send_message(update, context, "Дата платежу (YYYY-MM-DD):")
+
+        return PAYMENT_DATE
+
+    await send_message(update, context, "Курс до EUR:")
+
+    return PAYMENT_RATE
+
+async def payment_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    save_user_message(update, context)
+
+    try:
+        rate = float(update.message.text.replace(",", "."))
+    except:
+        await send_message(update, context, "Введіть число")
+        return PAYMENT_RATE
+
+    context.user_data["exchange_rate_to_eur"] = rate
+
+    await send_message(update, context, "Дата платежу (YYYY-MM-DD):")
+
+    return PAYMENT_DATE
+
+async def payment_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    save_user_message(update, context)
+
+    context.user_data["payment_date"] = update.message.text
+
+    add_payment(context.user_data)
+
+    update_invoice_status(context.user_data["invoice_id"])
+
+    await clear_dialog(update, context)
+
+    await send_payment_summary(update, context)
+
+    await show_main_menu(update)
+
+    return ConversationHandler.END
+
+
+#------------- HISTORY ----------------
+
+async def start_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    save_user_message(update, context)
+
+    clients = get_clients()
+
+    keyboard = [[c["name"]] for c in clients]
+
+    await send_message(
+        update,
+        context,
+        "Оберіть клієнта:",
+        ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+
+    return HISTORY_CLIENT
+
+async def history_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    client_name = update.message.text
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT id
+        FROM entities
+        WHERE name = ?
+        AND type='client'
+        """,
+        (client_name,)
+    )
+
+    row = cursor.fetchone()
+
+    conn.close()
+
+    client_id = row["id"]
+
+    processes = get_processes_by_client(client_id)
+
+    keyboard = [[p["process_number"]] for p in processes]
+
+    await send_message(
+        update,
+        context,
+        "Оберіть процес:",
+        ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+
+    return HISTORY_PROCESS
+
+async def history_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    process_number = update.message.text
+
+    process_id = get_process_id(process_number)
+
+    events = get_process_events(process_id)
+
+    if not events:
+
+        await update.message.reply_text("Історія процесу порожня")
+        return ConversationHandler.END
+
+    text = f"📜 *Історія процесу #{process_number}*\n\n"
+
+    for e in events:
+
+        date = e["created_at"][:16]  # YYYY-MM-DD HH:MM
+
+        date = date.replace("-", ".")
+        date = f"{date[8:10]}.{date[5:7]}.{date[0:4]} {date[11:16]}"
+
+        description = e["description"]
+
+        if "процес" in description.lower():
+            icon = "📦"
+
+        elif "інвойс" in description.lower():
+            icon = "🧾"
+
+        elif "платіж" in description.lower():
+            icon = "💸"
+
+        else:
+            icon = "•"
+
+        text += f"{icon} {date}\n{description}\n\n"
+
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown"
+    )
+
+    await show_main_menu(update)
+
+    return ConversationHandler.END
+
 # ---------------- BOT ----------------
 
 app = ApplicationBuilder().token(TOKEN).build()
@@ -1111,36 +1938,59 @@ process_conversation = ConversationHandler(
     states={
 
         PROCESS_NUMBER: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, get_process_number)
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Закрити$"),
+                get_process_number
+            )
         ],
 
         CLIENT_NAME: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, get_client)
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Закрити$"),
+                get_client
+            )
         ],
 
         COMPANY_NAME: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, get_company_name)
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Закрити$"),
+                get_company_name
+            )
         ],
 
         POLAND: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, get_poland)
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Закрити$"),
+                get_poland
+            )
         ],
 
         PROCESS_DESCRIPTION: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, get_description)
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Закрити$"),
+                get_description
+            )
         ],
 
         SUPPLIER: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, get_supplier)
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Закрити$"),
+                get_supplier
+            )
         ],
 
         SUPPLIER_MENU: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, supplier_menu)
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Закрити$"),
+                supplier_menu
+            )
         ],
 
     },
 
-    fallbacks=[]
+    fallbacks=[
+        MessageHandler(filters.Regex("^❌ Закрити$"), cancel)
+    ]
 )
 
 invoice_conversation = ConversationHandler(
@@ -1194,14 +2044,91 @@ invoice_conversation = ConversationHandler(
     },
 
     fallbacks=[
-        CommandHandler("start", start)
+        CommandHandler("start", start),
+        MessageHandler(filters.Regex("^❌ Закрити$"), cancel)
     ]
 
 )
+
+payment_conversation = ConversationHandler(
+
+    entry_points=[
+        MessageHandler(filters.Regex("^Додати оплату$"), start_add_payment)
+    ],
+
+    states={
+
+        PAYMENT_CLIENT: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, payment_client)
+        ],
+
+        PAYMENT_PROCESS: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, payment_process)
+        ],
+
+        PAYMENT_INVOICE: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, payment_invoice)
+        ],
+
+        PAYMENT_NUMBER: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, payment_number)
+        ],
+
+        PAYMENT_AMOUNT: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, payment_amount)
+        ],
+
+        PAYMENT_CURRENCY: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, payment_currency)
+        ],
+
+        PAYMENT_RATE: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, payment_rate)
+        ],
+
+        PAYMENT_DATE: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, payment_date)
+        ]
+
+    },
+
+    fallbacks=[
+        MessageHandler(filters.Regex("^❌ Закрити$"), cancel)
+    ]
+)
+
+history_conversation = ConversationHandler(
+
+    entry_points=[
+        MessageHandler(filters.Regex("^Історія процесу$"), start_history)
+    ],
+
+    states={
+
+        HISTORY_CLIENT: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, history_client)
+        ],
+
+        HISTORY_PROCESS: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, history_process)
+        ]
+
+    },
+
+    fallbacks=[
+        MessageHandler(filters.Regex("^❌ Закрити$"), cancel)
+    ]
+)
+
+
+
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(register_conversation)
 app.add_handler(process_conversation)
 app.add_handler(invoice_conversation)
+app.add_handler(payment_conversation)
+app.add_handler(history_conversation)
+
 
 app.run_polling()
